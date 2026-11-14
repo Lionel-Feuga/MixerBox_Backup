@@ -1,0 +1,8 @@
+node_modules
+.next
+.git
+test-output
+tests
+scripts
+*.tsbuildinfo
+README.md
