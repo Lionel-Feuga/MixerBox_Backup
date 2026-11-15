@@ -10,17 +10,14 @@ async function api<T>(url: string, signal: AbortSignal): Promise<T> {
   if (!response.ok) throw new Error(body.error || 'La récupération a échoué.');
   return body;
 }
-function saveFile(data: BlobPart, type: string, name: string) {
-  const url = URL.createObjectURL(new Blob([data], { type }));
-  const a = document.createElement('a');
-  a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 30_000);
-}
-async function savePdf(backup: Backup) {
+async function buildPdf(backup: Backup) {
   const [{ createBackupPdf }, response] = await Promise.all([import('@/lib/pdf'), fetch('/fonts/NotoSans-Regular.ttf')]);
   if (!response.ok) throw new Error('La police du PDF n’a pas pu être chargée.');
   const { bytes } = await createBackupPdf(backup, new Uint8Array(await response.arrayBuffer()));
-  saveFile(bytes.slice().buffer as ArrayBuffer, 'application/pdf', `MixerBox_Backup_${backup.exportedAt.slice(0, 10)}.pdf`);
+  return {
+    href: URL.createObjectURL(new Blob([bytes.slice().buffer as ArrayBuffer], { type: 'application/pdf' })),
+    name: `MixerBox_Backup_${backup.exportedAt.slice(0, 10)}.pdf`,
+  };
 }
 
 type Status = 'idle' | 'busy' | 'done' | 'incomplete' | 'error';
@@ -28,14 +25,17 @@ type Status = 'idle' | 'busy' | 'done' | 'incomplete' | 'error';
 export default function Home() {
   const [url, setUrl] = useState('');
   const [status, setStatus] = useState<Status>('idle');
+  const [pdf, setPdf] = useState<{ href: string; name: string } | null>(null);
   const controller = useRef<AbortController | null>(null);
   useEffect(() => () => controller.current?.abort(), []);
+  // Free the previous PDF when a new one replaces it.
+  useEffect(() => () => { if (pdf) URL.revokeObjectURL(pdf.href); }, [pdf]);
   const busy = status === 'busy';
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (busy) return;
-    setStatus('busy');
+    setStatus('busy'); setPdf(null);
     const abort = new AbortController(); controller.current = abort;
     try {
       const discovery = await api<Discovery>(`/api/discover?url=${encodeURIComponent(url.trim())}`, abort.signal);
@@ -53,7 +53,8 @@ export default function Home() {
       if (abort.signal.aborted) return;
       const result = assemble(discovery, loaded, failures, url.trim());
       if (!result.complete) { console.warn('Sauvegarde incomplète', result.warnings); setStatus('incomplete'); return; }
-      await savePdf(result);
+      // Phones only allow a download started by a tap, so the PDF is offered as a link.
+      setPdf(await buildPdf(result));
       setStatus('done');
     } catch (e) {
       if (abort.signal.aborted) return;
@@ -66,11 +67,12 @@ export default function Home() {
     <form onSubmit={submit}>
       <label htmlFor="playlist-url">Copie colle le lien de n’importe quelle playlist ci-dessous</label>
       <div className="field">
-        <input id="playlist-url" type="url" required value={url} disabled={busy} onChange={e => { setUrl(e.target.value); if (status === 'error' || status === 'incomplete') setStatus('idle'); }} autoComplete="off" spellCheck={false} />
+        <input id="playlist-url" type="url" required value={url} disabled={busy} onChange={e => { setUrl(e.target.value); if (status !== 'busy') setStatus('idle'); }} autoComplete="off" spellCheck={false} />
         <button type="submit" disabled={busy} aria-label="Valider">{busy ? <LoaderCircle className="spin" size={22} /> : <ArrowRight size={22} />}</button>
       </div>
       <p className="message" role="status" aria-live="polite">
         {status === 'busy' && 'Un instant…'}
+        {status === 'done' && pdf && <a className="download" href={pdf.href} download={pdf.name}>Télécharger le PDF</a>}
         {status === 'incomplete' && 'Il en manque une partie. Réessaie dans un moment.'}
         {status === 'error' && 'Ça n’a pas marché. Vérifie le lien et réessaie.'}
       </p>
