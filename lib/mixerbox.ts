@@ -29,7 +29,12 @@ async function request(path: string): Promise<unknown> {
     headers: { Referer: `${ORIGIN}/`, 'browser-lang': 'fr', 'country-code': 'fr', Accept: 'application/json' },
     redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(20_000),
   });
-  if (!response.ok) throw new Error(response.status === 429 ? 'MixerBox reçoit trop de demandes. Patientez une minute puis réessayez.' : 'MixerBox est momentanément inaccessible. Réessayez.');
+  if (response.status === 429) {
+    const error = new Error('MixerBox reçoit trop de demandes. Patientez une minute puis réessayez.');
+    error.name = 'RateLimitError';
+    throw error;
+  }
+  if (!response.ok) throw new Error('MixerBox est momentanément inaccessible. Réessayez.');
   if (Number(response.headers.get('content-length') || 0) > LIMIT) throw new Error('Cette réponse dépasse la taille maximale prise en charge.');
   if (!response.body) throw new Error('MixerBox a renvoyé une réponse vide.');
   const reader = response.body.getReader();

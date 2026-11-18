@@ -4,11 +4,20 @@ import { ArrowRight, LoaderCircle } from 'lucide-react';
 import type { Backup, Discovery, Playlist } from '@/lib/types';
 import { assemble } from '@/lib/backup';
 
+const wait = (ms: number, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
+  const timer = setTimeout(resolve, ms);
+  signal.addEventListener('abort', () => { clearTimeout(timer); reject(signal.reason); }, { once: true });
+});
+// MixerBox answers 429 when asked too often: wait longer and longer, then try again.
+const RETRY_DELAYS = [3_000, 6_000, 12_000, 20_000, 30_000];
 async function api<T>(url: string, signal: AbortSignal): Promise<T> {
-  const response = await fetch(url, { signal });
-  const body = await response.json();
-  if (!response.ok) throw new Error(body.error || 'La récupération a échoué.');
-  return body;
+  for (let attempt = 0; ; attempt++) {
+    const response = await fetch(url, { signal });
+    const body = await response.json();
+    if (response.ok) return body;
+    if (response.status === 429 && attempt < RETRY_DELAYS.length) { await wait(RETRY_DELAYS[attempt], signal); continue; }
+    throw new Error(body.error || 'La récupération a échoué.');
+  }
 }
 async function buildPdf(backup: Backup) {
   const [{ createBackupPdf }, response] = await Promise.all([import('@/lib/pdf'), fetch('/fonts/NotoSans-Regular.ttf')]);
@@ -42,14 +51,13 @@ export default function Home() {
       const loaded: Playlist[] = [discovery.seed];
       const failures: string[] = [];
       const queue = discovery.candidates.filter(c => c.id !== discovery.seed.id);
-      // A few requests at a time, each within the Vercel function timeout.
-      await Promise.all(Array.from({ length: Math.min(3, queue.length) }, async () => {
-        while (queue.length && !abort.signal.aborted) {
-          const candidate = queue.shift()!;
-          try { loaded.push(await api<Playlist>(`/api/playlist?id=${encodeURIComponent(candidate.id)}`, abort.signal)); }
-          catch (e) { if (abort.signal.aborted) throw e; failures.push(`${candidate.name} : ${e instanceof Error ? e.message : 'récupération impossible'}`); }
-        }
-      }));
+      // One playlist at a time with a short pause, so MixerBox does not refuse the requests.
+      for (const candidate of queue) {
+        if (abort.signal.aborted) break;
+        await wait(600, abort.signal);
+        try { loaded.push(await api<Playlist>(`/api/playlist?id=${encodeURIComponent(candidate.id)}`, abort.signal)); }
+        catch (e) { if (abort.signal.aborted) throw e; failures.push(`${candidate.name} : ${e instanceof Error ? e.message : 'récupération impossible'}`); }
+      }
       if (abort.signal.aborted) return;
       const result = assemble(discovery, loaded, failures, url.trim());
       if (!result.complete) { console.warn('Sauvegarde incomplète', result.warnings); setStatus('incomplete'); return; }
